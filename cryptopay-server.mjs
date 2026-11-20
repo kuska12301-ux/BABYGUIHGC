@@ -20,11 +20,49 @@ const apiBase = testnet ? 'https://testnet-pay.crypt.bot/api' : 'https://pay.cry
 const dataDir = process.env.DATA_DIR || path.join(here, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 const invoiceFile = path.join(dataDir, 'cryptopay-invoices.json');
+const profilesFile = path.join(dataDir, 'telegram-profiles.json');
 let persisted = {};
 try { persisted = JSON.parse(fs.readFileSync(invoiceFile, 'utf8')); } catch {}
 const invoices = new Map(Object.entries(persisted));
 function persistInvoices() { fs.writeFileSync(invoiceFile, JSON.stringify(Object.fromEntries(invoices)), 'utf8'); }
+let profiles = {};
+try { profiles = JSON.parse(fs.readFileSync(profilesFile, 'utf8')); } catch {}
+function persistProfiles() { fs.writeFileSync(profilesFile, JSON.stringify(profiles), 'utf8'); }
 const token = process.env.CRYPTO_PAY_API_TOKEN || '';
+
+function telegramUserFromInitData(initData) {
+  const botToken = process.env.BOT_TOKEN || '';
+  if (!botToken || typeof initData !== 'string' || !initData) return null;
+  const values = new URLSearchParams(initData);
+  const receivedHash = values.get('hash');
+  if (!receivedHash || !/^[a-f0-9]{64}$/i.test(receivedHash)) return null;
+  const authDate = Number(values.get('auth_date'));
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(authDate) || authDate > now + 60 || now - authDate > 86400) return null;
+  values.delete('hash');
+  const dataCheckString = [...values.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join('\n');
+  const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const calculatedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+  if (!crypto.timingSafeEqual(Buffer.from(receivedHash), Buffer.from(calculatedHash))) return null;
+  try { return JSON.parse(values.get('user') || ''); } catch { return null; }
+}
+function profileFromTelegramUser(user, existing = {}) {
+  const telegramId = String(user.id);
+  return {
+    ...existing,
+    id: telegramId,
+    telegramId,
+    name: [user.first_name, user.last_name].filter(Boolean).join(' ') || 'Пользователь Telegram',
+    tag: user.username ? `@${user.username}` : '',
+    avatar: String(user.first_name || 'М').slice(0, 1),
+    avatarUrl: user.photo_url || '',
+    color: existing.color || 'linear-gradient(145deg,#9d8cff,#4f7be8)',
+    tickets: Number(existing.tickets) || 0,
+    registeredAt: existing.registeredAt || new Date().toISOString().slice(0, 10),
+    lastSeenAt: new Date().toISOString(),
+    flag: Boolean(existing.flag)
+  };
+}
 
 function send(res, status, value, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -56,6 +94,27 @@ const server = http.createServer(async (req, res) => {
       const bootstrap = '<script>window.BABY_GIFT_ADMIN_ID=' + JSON.stringify(adminId) + ';window.BABY_GIFT_BOT_USERNAME=' + JSON.stringify(botUsername) + ';</script>';
       const html = fs.readFileSync(htmlPath, 'utf8').replace('<script>', bootstrap + '<script>');
       return send(res, 200, html, 'text/html; charset=utf-8');
+    }
+    if (req.method === 'POST' && url.pathname === '/api/profile') {
+      const body = await readBody(req);
+      const user = telegramUserFromInitData(body.initData);
+      if (!user?.id) return send(res, 401, { error: 'Открой приложение через Telegram, чтобы загрузить профиль.' });
+      const profile = profileFromTelegramUser(user, profiles[String(user.id)]);
+      profiles[String(user.id)] = profile;
+      persistProfiles();
+      return send(res, 200, { profile });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/profiles') {
+      const body = await readBody(req);
+      const user = telegramUserFromInitData(body.initData);
+      const adminId = String(process.env.ADMIN_ID || '');
+      if (!user?.id) return send(res, 401, { error: 'Требуется открыть приложение через Telegram.' });
+      if (!adminId || String(user.id) !== adminId) return send(res, 403, { error: 'Список пользователей доступен только организатору.' });
+      const list = Object.values(profiles).map(p => ({
+        id: p.id, telegramId: p.telegramId, name: p.name, tag: p.tag,
+        avatar: p.avatar, avatarUrl: p.avatarUrl, registeredAt: p.registeredAt, lastSeenAt: p.lastSeenAt
+      })).sort((a, b) => String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)));
+      return send(res, 200, { profiles: list });
     }
     if (url.pathname.startsWith('/api/')) {
       if (!token) return send(res, 503, { error: 'Укажи CRYPTO_PAY_API_TOKEN в файле .env и перезапусти сервер.' });

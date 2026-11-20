@@ -14,6 +14,8 @@ Set the environment variables `BOT_TOKEN`, `ADMIN_ID`, `BOT_USERNAME`, `WEBAPP_U
 
 Secrets belong in BotHost environment settings, never in Git. Keep `.env` out of the repository.
 
-## Current app storage note
+## Profile storage note
 
-Raffle and profile data in the current Mini App are still browser-local. A shared production database and server-side authorization are required before different Telegram users can share one raffle state or before the client-side organizer tools can be treated as a security boundary.
+When opened as a Telegram Mini App, the app sends Telegram's signed `initData` to the server. The server verifies it with `BOT_TOKEN` and records the user's Telegram ID, name, username, avatar URL, and last-seen time in `DATA_DIR/telegram-profiles.json`. Only the configured `ADMIN_ID` can retrieve the shared profile list. Set `DATA_DIR` to persistent storage on the host if its app filesystem is temporary.
+
+Raffle state and ticket balances are still browser-local. The shared profile list is for identifying registered users; it does not make raffle participation or ticket balances shared between devices.
